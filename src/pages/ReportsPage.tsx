@@ -246,8 +246,8 @@ const ReportsPage = () => {
                       </SelectTrigger>
                       <SelectContent>
                         <SelectItem value="all">Todos</SelectItem>
-                        <SelectItem value="input">Entradas</SelectItem>
-                        <SelectItem value="output">Salidas</SelectItem>
+                        <SelectItem value="ingreso">Entradas</SelectItem>
+                        <SelectItem value="egreso">Salidas</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>
@@ -339,7 +339,7 @@ const ReportsPage = () => {
                         <TableRow key={item._id}>
                           <TableCell>{formatDate(item.date)}</TableCell>
                           <TableCell>
-                            {item.type === 'input' ? 'Entrada' : 'Salida'}
+                            {item.type === 'ingreso' ? 'Entrada' : 'Salida'}
                           </TableCell>
                           <TableCell>{item.productName}</TableCell>
                           <TableCell>{item.quantity}</TableCell>

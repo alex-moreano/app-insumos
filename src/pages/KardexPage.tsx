@@ -213,7 +213,7 @@ const KardexPage = () => {
                   <TableRow key={index}>
                     <TableCell>{formatDate(entry.date)}</TableCell>
                     <TableCell>
-                      {entry.type === 'input' ? 'Entrada' : 'Salida'}
+                      {entry.type === 'ingreso' ? 'Entrada' : 'Salida'}
                     </TableCell>
                     <TableCell>{entry.description}</TableCell>
                     <TableCell className="text-right">{entry.input || '-'}</TableCell>

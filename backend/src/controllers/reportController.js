@@ -27,7 +27,7 @@ exports.getMovements = async (req, res) => {
     }
     
     if (productId) {
-      filter.productId = new mongoose.Types.ObjectId(productId);
+      filter['lines.productId'] = new mongoose.Types.ObjectId(productId);
     }
     
     if (warehouseId) {
@@ -36,24 +36,32 @@ exports.getMovements = async (req, res) => {
     
     // Get movements with populated references
     const movements = await Movement.find(filter)
-      .populate('productId', 'name sku unit')
       .populate('warehouseId', 'name')
       .populate('supplierId', 'name')
-      .populate('userId', 'name')
+      .populate('createdBy', 'name')
       .sort({ date: -1 });
     
-    // Format response
-    const formattedMovements = movements.map(movement => ({
-      _id: movement._id,
-      type: movement.type,
-      productId: movement.productId._id,
-      productName: movement.productId.name,
-      quantity: movement.quantity,
-      date: movement.date,
-      supplier: movement.supplierId ? movement.supplierId.name : null,
-      warehouse: movement.warehouseId ? movement.warehouseId.name : null,
-      createdBy: movement.userId ? movement.userId.name : 'Sistema'
-    }));
+    // Format response - flatten movement lines into individual entries
+    const formattedMovements = [];
+    movements.forEach(movement => {
+      movement.lines.forEach(line => {
+        formattedMovements.push({
+          _id: movement._id + '_' + line._id,
+          movementId: movement._id,
+          type: movement.type,
+          productId: line.productId,
+          productName: line.productName,
+          quantity: line.quantity,
+          date: movement.date,
+          supplier: movement.supplierId ? movement.supplierId.name : null,
+          warehouse: movement.warehouseId ? movement.warehouseId.name : null,
+          createdBy: movement.createdBy ? movement.createdBy.name : 'Sistema',
+          lot: line.lot,
+          unitCost: line.unitCost,
+          note: line.note
+        });
+      });
+    });
     
     res.status(200).json(formattedMovements);
   } catch (error) {
@@ -79,8 +87,8 @@ exports.getKardex = async (req, res) => {
       return res.status(404).json({ message: 'Producto no encontrado' });
     }
     
-    // Build filter object
-    const filter = { productId: new mongoose.Types.ObjectId(productId) };
+    // Build filter object - filter movements that contain this product in their lines
+    const filter = { 'lines.productId': new mongoose.Types.ObjectId(productId) };
     
     if (startDate && endDate) {
       filter.date = {
@@ -95,10 +103,9 @@ exports.getKardex = async (req, res) => {
     
     // Get movements for this product, sorted by date
     const movements = await Movement.find(filter)
-      .populate('productId', 'name sku unit price')
       .populate('warehouseId', 'name')
       .populate('supplierId', 'name')
-      .populate('userId', 'name')
+      .populate('createdBy', 'name')
       .sort({ date: 1 });
     
     // Calculate running balance
@@ -106,28 +113,36 @@ exports.getKardex = async (req, res) => {
     const entries = [];
     
     movements.forEach(movement => {
-      const entry = {
-        date: movement.date,
-        type: movement.type,
-        description: movement.type === 'input' 
-          ? `Entrada desde ${movement.supplierId ? movement.supplierId.name : 'Desconocido'}` 
-          : `Salida hacia ${movement.warehouseId ? movement.warehouseId.name : 'Desconocido'}`,
-        input: movement.type === 'input' ? movement.quantity : 0,
-        output: movement.type === 'output' ? movement.quantity : 0,
-        unitPrice: movement.price || product.price || 0,
-      };
+      // Find the line item for this specific product
+      const productLine = movement.lines.find(line => 
+        line.productId.toString() === productId
+      );
       
-      // Update balance
-      if (movement.type === 'input') {
-        balance += movement.quantity;
-      } else {
-        balance -= movement.quantity;
+      if (productLine) {
+        const entry = {
+          date: movement.date,
+          type: movement.type,
+          description: movement.type === 'ingreso' 
+            ? `Entrada desde ${movement.supplierId ? movement.supplierId.name : 'Desconocido'}` 
+            : `Salida hacia ${movement.warehouseId ? movement.warehouseId.name : 'Desconocido'}`,
+          input: movement.type === 'ingreso' ? productLine.quantity : 0,
+          output: movement.type === 'egreso' ? productLine.quantity : 0,
+          unitPrice: productLine.unitCost || product.price || 0,
+          lot: productLine.lot || null
+        };
+        
+        // Update balance
+        if (movement.type === 'ingreso') {
+          balance += productLine.quantity;
+        } else {
+          balance -= productLine.quantity;
+        }
+        
+        entry.balance = balance;
+        entry.totalValue = entry.balance * entry.unitPrice;
+        
+        entries.push(entry);
       }
-      
-      entry.balance = balance;
-      entry.totalValue = entry.balance * entry.unitPrice;
-      
-      entries.push(entry);
     });
     
     // Format response
@@ -135,7 +150,7 @@ exports.getKardex = async (req, res) => {
       product: {
         _id: product._id,
         name: product.name,
-        sku: product.sku,
+        code: product.code,
         category: product.category,
         unit: product.unit
       },
@@ -155,66 +170,78 @@ exports.getStockReport = async (req, res) => {
     const { warehouseId, categoryId } = req.query;
     
     // Build match stage for aggregation
-    const match = {};
+    const productFilter = {};
     
+    if (categoryId) {
+      productFilter.category = categoryId;
+    }
+    
+    // Get all products with optional category filter
+    const products = await Product.find(productFilter);
+    
+    // Get warehouse information
+    const Warehouse = require('../models/warehouseModel');
+    let warehouses = [];
     if (warehouseId) {
-      match.warehouseId = new mongoose.Types.ObjectId(warehouseId);
-    }
-    
-    if (categoryId) {
-      match.categoryId = new mongoose.Types.ObjectId(categoryId);
-    }
-    
-    // Get current stock levels
-    const products = await Product.find({})
-      .populate('category', 'name')
-      .populate({
-        path: 'stockByWarehouse',
-        populate: {
-          path: 'warehouseId',
-          model: 'Warehouse',
-          select: 'name'
-        }
-      });
-    
-    // Format response based on filters
-    let stockReport = products.map(product => {
-      const stockData = {
-        _id: product._id,
-        name: product.name,
-        sku: product.sku,
-        unit: product.unit,
-        category: product.category ? product.category.name : 'Sin categoría',
-        price: product.price,
-        totalStock: product.stockByWarehouse.reduce(
-          (total, item) => total + item.quantity, 0
-        ),
-        warehouses: product.stockByWarehouse.map(item => ({
-          warehouseId: item.warehouseId._id,
-          warehouseName: item.warehouseId.name,
-          quantity: item.quantity
-        }))
-      };
-      
-      // Apply warehouse filter if specified
-      if (warehouseId) {
-        stockData.warehouses = stockData.warehouses.filter(
-          w => w.warehouseId.toString() === warehouseId
-        );
-        stockData.totalStock = stockData.warehouses.reduce(
-          (total, item) => total + item.quantity, 0
-        );
+      const warehouse = await Warehouse.findById(warehouseId);
+      if (!warehouse) {
+        return res.status(404).json({ message: 'Almacén no encontrado' });
       }
-      
-      return stockData;
-    });
+      warehouses = [warehouse];
+    } else {
+      warehouses = await Warehouse.find({ isActive: true });
+    }
     
-    // Apply category filter if specified
-    if (categoryId) {
-      stockReport = stockReport.filter(item => 
-        item.category && item.category._id && 
-        item.category._id.toString() === categoryId
-      );
+    // Build stock report
+    const stockReport = [];
+    
+    for (const product of products) {
+      for (const warehouse of warehouses) {
+        // Calculate stock for this product in this warehouse
+        // by aggregating movement lines
+        const movements = await Movement.find({
+          warehouseId: warehouse._id,
+          'lines.productId': product._id,
+          status: 'active'
+        }).populate('lines.productId');
+        
+        let currentStock = 0;
+        let lastMovementDate = null;
+        
+        movements.forEach(movement => {
+          const productLine = movement.lines.find(line => 
+            line.productId._id.toString() === product._id.toString()
+          );
+          
+          if (productLine) {
+            if (movement.type === 'ingreso') {
+              currentStock += productLine.quantity;
+            } else if (movement.type === 'egreso') {
+              currentStock -= productLine.quantity;
+            }
+            
+            if (!lastMovementDate || movement.date > lastMovementDate) {
+              lastMovementDate = movement.date;
+            }
+          }
+        });
+        
+        // Only include in report if there's stock or movements
+        if (currentStock > 0 || lastMovementDate) {
+          stockReport.push({
+            _id: `${product._id}_${warehouse._id}`,
+            productId: product._id,
+            productCode: product.code,
+            productName: product.name,
+            productCategory: product.category,
+            productUnit: product.unit,
+            warehouseId: warehouse._id,
+            warehouseName: warehouse.name,
+            quantity: currentStock,
+            lastMovement: lastMovementDate
+          });
+        }
+      }
     }
     
     res.status(200).json(stockReport);
