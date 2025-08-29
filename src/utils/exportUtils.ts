@@ -43,7 +43,7 @@ export const exportMovementsToPdf = (data: MovementReport[], title: string) => {
   // Format data for table
   const tableData = data.map(item => [
     formatDate(item.date),
-    item.type === 'input' ? 'Entrada' : 'Salida',
+    item.type === 'ingreso' ? 'Entrada' : 'Salida',
     item.productName,
     item.quantity.toString(),
     item.supplier || item.warehouse || '-',
